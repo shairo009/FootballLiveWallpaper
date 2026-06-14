@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Football Box Wallpaper</title>
+    <script src="three.min.js"></script>
+    <style>
+        body, html { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#228B22; }
+        #canvas-container { position:fixed; top:0; left:0; width:100%; height:100%; z-index:0; }
+
+        #ui-layer {
+            position:absolute; top:20px; left:20px; z-index:100;
+            transition: opacity 0.5s ease;
+        }
+        .btn {
+            background:rgba(255,255,255,0.22);
+            backdrop-filter:blur(12px);
+            border:1px solid rgba(255,255,255,0.3);
+            color:#111; padding:11px 18px; border-radius:14px;
+            font-size:13px; font-weight:700; margin-bottom:9px;
+            display:flex; align-items:center; gap:9px; cursor:pointer;
+            font-family:system-ui,sans-serif;
+            -webkit-tap-highlight-color:transparent;
+            user-select:none;
+        }
+        .btn:active { transform:scale(0.95); }
+        .hidden-ui { opacity:0 !important; pointer-events:none !important; }
+
+        /* Gyro ball indicator */
+        #gyro-hud {
+            position:fixed; bottom:20px; right:16px; z-index:100;
+            text-align:center; pointer-events:none;
+        }
+        #gyro-ring {
+            width:60px; height:60px; border-radius:50%;
+            border:2px solid rgba(0,0,0,0.18);
+            background:rgba(255,255,255,0.28);
+            backdrop-filter:blur(6px);
+            position:relative; margin:0 auto 5px;
+        }
+        #gyro-dot {
+            width:14px; height:14px; border-radius:50%;
+            background:#222; position:absolute;
+            left:50%; top:50%;
+            transform:translate(-50%,-50%);
+            box-shadow:0 0 6px rgba(0,0,0,0.4);
+        }
+        #gyro-lbl { font:700 9px/1 system-ui; color:rgba(0,0,0,0.35); letter-spacing:1.5px; text-transform:uppercase; }
+        #gyro-nums { font:9px/1.6 system-ui; color:rgba(0,0,0,0.3); margin-top:2px; }
+
+        /* Status pill */
+        #status-pill {
+            position:fixed; top:50%; left:50%;
+            transform:translate(-50%,-50%);
+            background:rgba(0,0,0,0.78); color:#fff;
+            padding:14px 26px; border-radius:24px;
+            font:600 14px/1.5 system-ui; z-index:300;
+            text-align:center;
+            transition: opacity 0.6s;
+            max-width:80vw;
+        }
+        #status-pill.hide { opacity:0; pointer-events:none; }
+    </style>
+</head>
+<body>
+
+<div id="status-pill">⚽ Football Wallpaper<br><small style="opacity:0.6">Accelerometer load ho raha hai...</small></div>
+
+<div id="ui-layer">
+    <button class="btn" id="downloadBtn">
+        <svg width="17" height="17" fill="currentColor" viewBox="0 0 24 24"><path d="M12 16l-5-5h3V4h4v7h3l-5 5zm9 4H3v-2h18v2z"/></svg>Download
+    </button>
+    <button class="btn" id="fullscreenBtn">
+        <svg width="17" height="17" fill="currentColor" viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>Fullscreen
+    </button>
+    <button class="btn" id="sensorToggle">📱 <span id="sensor-lbl">Sensor: ON</span></button>
+</div>
+
+<div id="gyro-hud">
+    <div id="gyro-ring"><div id="gyro-dot"></div></div>
+    <div id="gyro-lbl">TILT</div>
+    <div id="gyro-nums" id="gyro-reading">—</div>
+</div>
+
+<div id="canvas-container"></div>
+
+<script>
+// ─── CONFIG ────────────────────────────────────────────────
+const BALL_COUNT    = 20;
+const BASE_GRAVITY  = 0.006;
+const BOUNCE_FACTOR = 1.02;
+const SPEED_LIMIT   = 0.28;
+const ballRadius    = 0.85;
+
+// ─── STATUS ────────────────────────────────────────────────
+const pill = document.getElementById('status-pill');
+function showPill(msg, autohide = 0) {
+    pill.innerHTML = msg;
+    pill.classList.remove('hide');
+    if (autohide) setTimeout(() => pill.classList.add('hide'), autohide);
+}
+
+// ─── SCENE ────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x228B22); // Forest Green base for safety
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.set(0, 0, 24);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+dirLight.position.set(5, 20, 10);
+dirLight.castShadow = true;
+dirLight.shadow.camera.left = dirLight.shadow.camera.bottom = -30;
+dirLight.shadow.camera.right = dirLight.shadow.camera.top = 30;
+dirLight.shadow.camera.near = 0.5; dirLight.shadow.camera.far = 80;
+dirLight.shadow.mapSize.set(2048, 2048);
+scene.add(dirLight);
+
+// ─── BOX ──────────────────────────────────────────────────
+const boxLimits = { x: 1, y: 1, z: 5 };
+let boxMesh;
+function setupBox() {
+    if (boxMesh) scene.remove(boxMesh);
+    const vFOV = THREE.MathUtils.degToRad(camera.fov);
+    const height = 2 * Math.tan(vFOV / 2) * camera.position.z;
+    const width  = height * camera.aspect;
+    boxLimits.x = width / 2;
+    boxLimits.y = height / 2;
+    boxLimits.z = 5;
+    const geo = new THREE.BoxGeometry(width * 1.05, height * 1.05, boxLimits.z * 2);
+    const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, side: THREE.BackSide, roughness: 1.0 });
+    boxMesh = new THREE.Mesh(geo, mat);
+    boxMesh.receiveShadow = true;
+    scene.add(boxMesh);
+    if (balls) balls.forEach(b => {
+        b.position.x = THREE.MathUtils.clamp(b.position.x, -(boxLimits.x - ballRadius), boxLimits.x - ballRadius);
+        b.position.y = THREE.MathUtils.clamp(b.position.y, -(boxLimits.y - ballRadius), boxLimits.y - ballRadius);
+        b.position.z = THREE.MathUtils.clamp(b.position.z, -(boxLimits.z - ballRadius), boxLimits.z - ballRadius);
+    });
+}
+
+// ─── FOOTBALL TEXTURE ─────────────────────────────────────
+function createFootballTexture() {
+    const c = document.createElement('canvas');
+    c.width = c.height = 512;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, 512, 512);
+    ctx.fillStyle = '#111111';
+    [[256,256,60],[140,140,45],[372,140,45],[90,300,45],[422,300,45],
+     [200,420,45],[312,420,45],[256,60,40],[60,200,38],[452,200,38],
+     [150,470,35],[362,470,35]].forEach(([x,y,r]) => {
+        ctx.beginPath();
+        for (let i = 0; i < 5; i++) {
+            const a = (i * 2 * Math.PI / 5) - Math.PI / 2;
+            i === 0 ? ctx.moveTo(x + r*Math.cos(a), y + r*Math.sin(a))
+                    : ctx.lineTo(x + r*Math.cos(a), y + r*Math.sin(a));
+        }
+        ctx.closePath(); ctx.fill();
+    });
+    ctx.strokeStyle = '#333'; ctx.lineWidth = 4;
+    [[256,196,200,280],[256,196,312,280],[200,280,140,185],[312,280,372,185]].forEach(([x1,y1,x2,y2]) => {
+        ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+    });
+    return new THREE.CanvasTexture(c);
+}
+
+const ballTex = createFootballTexture();
+const ballGeo = new THREE.SphereGeometry(ballRadius, 32, 32);
+const balls   = [];
+setupBox();
+
+for (let i = 0; i < BALL_COUNT; i++) {
+    const b = new THREE.Mesh(ballGeo, new THREE.MeshStandardMaterial({ map: ballTex, roughness: 0.35 }));
+    b.castShadow = b.receiveShadow = true;
+    b.position.set(
+        (Math.random()-0.5)*(boxLimits.x*2-ballRadius*2),
+        (Math.random()-0.5)*(boxLimits.y*2-ballRadius*2),
+        (Math.random()-0.5)*(boxLimits.z*2-ballRadius*2)
+    );
+    const sp=0.08+Math.random()*0.10, th=Math.random()*Math.PI*2, ph=Math.random()*Math.PI;
+    b.userData.vel = new THREE.Vector3(
+        sp*Math.sin(ph)*Math.cos(th), sp*Math.sin(ph)*Math.sin(th), sp*Math.cos(ph)*0.4
+    );
+    scene.add(b); balls.push(b);
+}
+
+// ─── GRAVITY & SENSOR ─────────────────────────────────────
+const gravity    = new THREE.Vector3(0, -BASE_GRAVITY, 0);
+let sensorOn     = true;
+let sensorActive = false;
+
+const gyroDot  = document.getElementById('gyro-dot');
+const gyroNums = document.getElementById('gyro-nums');
+
+// Smooth tilt values
+let smoothX = 0, smoothY = 0;
+const SMOOTH = 0.15; // lerp factor
+
+function applyTilt(ax, ay) {
+    // ax = left/right acceleration, ay = front/back
+    // clamp to +-9.8 (1g) then normalize to -1..1
+    const nx = Math.max(-1, Math.min(1, ax / 9.8));
+    const ny = Math.max(-1, Math.min(1, ay / 9.8));
+
+    smoothX += (nx - smoothX) * SMOOTH;
+    smoothY += (ny - smoothY) * SMOOTH;
+
+    gravity.x =  smoothX * 0.04;
+    gravity.y = -BASE_GRAVITY - smoothY * 0.03;
+
+    // Update indicator dot
+    const cx = 30 + smoothX * 20;
+    const cy = 30 - smoothY * 20;
+    gyroDot.style.left = Math.max(7, Math.min(53, cx)) + 'px';
+    gyroDot.style.top  = Math.max(7, Math.min(53, cy)) + 'px';
+    gyroNums.textContent = `x:${ax.toFixed(1)} y:${ay.toFixed(1)}`;
+}
+
+// ─── METHOD 1: DeviceMotionEvent (accelerationIncludingGravity)
+// Works on file:// on Android WITHOUT permission ─────────────
+function tryDeviceMotion() {
+    let gotEvent = false;
+
+    function onMotion(e) {
+        const acc = e.accelerationIncludingGravity;
+        if (!acc) return;
+        if (!gotEvent) {
+            gotEvent = true;
+            sensorActive = true;
+            showPill('✅ Accelerometer kaam kar raha hai!<br><small>Phone tilao — balls hilenge</small>', 3000);
+        }
+        if (!sensorOn) return;
+        // On portrait Android: x = left/right, y = up/down (negated for natural feel)
+        applyTilt(acc.x, -acc.y);
+    }
+
+    window.addEventListener('devicemotion', onMotion, true);
+
+    // Check after 2s if we got any events
+    setTimeout(() => {
+        if (!gotEvent) {
+            // DeviceMotion also not working — try orientation as last resort
+            tryDeviceOrientation();
+        }
+    }, 2000);
+}
+
+// ─── METHOD 2: DeviceOrientationEvent fallback ─────────────
+function tryDeviceOrientation() {
+    let gotEvent = false;
+
+    function onOrientation(e) {
+        if (e.gamma === null) return;
+        if (!gotEvent) {
+            gotEvent = true;
+            sensorActive = true;
+            showPill('✅ Gyroscope kaam kar raha hai!<br><small>Phone tilao — balls hilenge</small>', 3000);
+        }
+        if (!sensorOn) return;
+        const gamma = e.gamma || 0;
+        const beta  = e.beta  || 0;
+        applyTilt(gamma / 9, -(beta - 30) / 9);
+    }
+
+    window.addEventListener('deviceorientation', onOrientation, true);
+
+    setTimeout(() => {
+        if (!gotEvent) {
+            showPill('⚠️ Sensor nahi mila<br><small>Touch se khelo — screen pe swipe karo</small>', 5000);
+        }
+    }, 2000);
+}
+
+// ─── METHOD 3: Touch swipe gravity control (always works) ──
+let lastTouch = null;
+window.addEventListener('touchstart', e => {
+    lastTouch = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    resetUI();
+}, { passive: true });
+window.addEventListener('touchmove', e => {
+    if (!lastTouch || sensorActive) return;
+    const dx = e.touches[0].clientX - lastTouch.x;
+    const dy = e.touches[0].clientY - lastTouch.y;
+    lastTouch = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    gravity.x += dx * 0.0008;
+    gravity.y -= dy * 0.0008;
+    gravity.x = Math.max(-0.04, Math.min(0.04, gravity.x));
+    gravity.y = Math.max(-0.06, Math.min(0.02, gravity.y));
+}, { passive: true });
+window.addEventListener('touchend', () => { lastTouch = null; }, { passive: true });
+
+// ─── START SENSORS ─────────────────────────────────────────
+showPill('⚽ Football Wallpaper<br><small style="opacity:0.6">Sensor shuru ho raha hai...</small>', 0);
+setTimeout(() => {
+    tryDeviceMotion();
+}, 500);
+
+// ─── SENSOR TOGGLE ─────────────────────────────────────────
+document.getElementById('sensorToggle').addEventListener('click', e => {
+    e.stopPropagation();
+    sensorOn = !sensorOn;
+    document.getElementById('sensor-lbl').textContent = sensorOn ? 'Sensor: ON' : 'Sensor: OFF';
+    if (!sensorOn) {
+        gravity.x = 0; gravity.y = -BASE_GRAVITY;
+        smoothX = 0; smoothY = 0;
+        gyroDot.style.left = gyroDot.style.top = '50%';
+    }
+});
+
+// ─── PHYSICS ──────────────────────────────────────────────
+function updatePhysics() {
+    balls.forEach((b, i) => {
+        const vel = b.userData.vel;
+        vel.addScaledVector(gravity, 1);
+        if (vel.length() > SPEED_LIMIT) vel.multiplyScalar(0.97);
+        b.position.add(vel);
+
+        const lx=boxLimits.x-ballRadius, ly=boxLimits.y-ballRadius, lz=boxLimits.z-ballRadius;
+        if (b.position.x >  lx) { b.position.x =  lx; vel.x *= -BOUNCE_FACTOR; }
+        if (b.position.x < -lx) { b.position.x = -lx; vel.x *= -BOUNCE_FACTOR; }
+        if (b.position.y >  ly) { b.position.y =  ly; vel.y *= -BOUNCE_FACTOR; }
+        if (b.position.y < -ly) { b.position.y = -ly; vel.y *= -BOUNCE_FACTOR; }
+        if (b.position.z >  lz) { b.position.z =  lz; vel.z *= -BOUNCE_FACTOR; }
+        if (b.position.z < -lz) { b.position.z = -lz; vel.z *= -BOUNCE_FACTOR; }
+
+        for (let j = i+1; j < balls.length; j++) {
+            const b2=balls[j], dVec=b.position.clone().sub(b2.position), dist=dVec.length();
+            if (dist < ballRadius*2 && dist > 0.0001) {
+                const normal=dVec.normalize(), relVel=vel.clone().sub(b2.userData.vel), dot=relVel.dot(normal);
+                if (dot < 0) {
+                    const imp=normal.clone().multiplyScalar(dot*BOUNCE_FACTOR);
+                    vel.sub(imp); b2.userData.vel.add(imp);
+                    const ov=(ballRadius*2-dist)/2;
+                    b.position.addScaledVector(normal,ov); b2.position.addScaledVector(normal,-ov);
+                }
+            }
+        }
+        b.rotation.x += vel.y*0.3; b.rotation.z -= vel.x*0.3;
+    });
+}
+
+// ─── UI HIDE ──────────────────────────────────────────────
+let uiTimer;
+function resetUI() {
+    document.getElementById('ui-layer').classList.remove('hidden-ui');
+    clearTimeout(uiTimer);
+    uiTimer = setTimeout(() => document.getElementById('ui-layer').classList.add('hidden-ui'), 4000);
+}
+window.addEventListener('mousemove', e => {
+    resetUI();
+    if (sensorActive && sensorOn) return;
+    gravity.x = ((e.clientX/window.innerWidth)-0.5)*0.04;
+    gravity.y = -BASE_GRAVITY+((e.clientY/window.innerHeight)-0.5)*-0.03;
+});
+
+// ─── BUTTONS ──────────────────────────────────────────────
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth/window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    setupBox();
+});
+document.getElementById('downloadBtn').onclick = e => {
+    e.stopPropagation();
+    const a = document.createElement('a');
+    a.href = 'data:text/html;charset=utf-8,'+encodeURIComponent(document.documentElement.outerHTML);
+    a.download = 'Football_Mobile_Wallpaper.html';
+    a.click();
+};
+document.getElementById('fullscreenBtn').onclick = e => {
+    e.stopPropagation();
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(()=>{});
+    else document.exitFullscreen();
+};
+
+// ─── ANIMATE ──────────────────────────────────────────────
+function animate() {
+    requestAnimationFrame(animate);
+    updatePhysics();
+    renderer.render(scene, camera);
+}
+animate();
+resetUI();
+</script>
+</body>
+</html>
